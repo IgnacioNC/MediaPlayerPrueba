@@ -6,10 +6,16 @@ import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.Writer;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+import java.util.zip.ZipOutputStream;
 
 import javax.imageio.ImageIO;
 
@@ -22,128 +28,151 @@ import fr.xxathyx.mediaplayer.Main;
 import fr.xxathyx.mediaplayer.video.Video;
 import fr.xxathyx.mediaplayer.video.data.VideoData;
 
-/** 
-* The ResourcePack class is only called once, while a video
-* is loading, and within the audio is enabled, see {@link Video#hasAudio()}
-*
-* @author  Xxathyx
-* @version 1.0.0
-* @since   2022-07-16 
-*/
-
+/**
+ * The ResourcePack class creates a resource pack based on a base resource pack and adds
+ * audio files and sound definitions for the video player.
+ */
 public class ResourcePack {
 	
 	private final Main plugin = Main.getPlugin(Main.class);
 	
-	/**
-	* Creates a resource-pack file base on a video, its used if the video is short enought during video loading.
-	* 
-	* @param The video containing audio track.
-	*/
+	// Ruta absoluta a tu resourcepack base
+	private final File baseResourcePackZip = new File("C:\\Users\\ignac\\Downloads\\PREPARACION SERVER MINECRAFT\\plugins\\ResourcePackManager\\output\\ResourcePackManager_RSP.zip");
+	
+	public void create(Video video) {
+		try {
+			createWithBase(video);
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+	}
 	
 	@SuppressWarnings("unchecked")
-	public void create(Video video) {
-		
+	public void createWithBase(Video video) throws IOException {
 		if(!video.hasAudio()) return;
 		
 		VideoData videoData = video.getVideoData();
 		
-		File resourcePackFolder = new File(videoData.getResourcePacksFolder(), video.getName());
-		File zipFile = new File(videoData.getResourcePacksFolder(), video.getName() + ".zip");
+		// Carpeta temporal para extraer el base resourcepack
+		File tempDir = new File(videoData.getResourcePacksFolder(), video.getName() + "_temp");
+		if(tempDir.exists()) deleteDirectory(tempDir);
+		tempDir.mkdirs();
 		
-		resourcePackFolder.mkdir();
+		// 1. Descomprimir el resourcepack base en tempDir
+		unzip(baseResourcePackZip, tempDir);
 		
-		File metaFile = new File(resourcePackFolder, "pack.mcmeta");
-		
-        JSONObject metaJSON = new JSONObject();
-        metaJSON.put("pack_format", getResourcePackFormat());
-        metaJSON.put("description", "Audio addon for " + video.getName());
-         
-        JSONObject packObject = new JSONObject(); 
-        packObject.put("pack", metaJSON);
-        
-        try (FileWriter file = new FileWriter(metaFile)) {
-            file.write(packObject.toJSONString()); 
-            file.flush();
-        }catch (IOException e) {
-            e.printStackTrace();
-        }
-        
+		// 2. Copiar el icono pack.png (opcional, puede quedar del base)
 		try {
 			Image pack = ImageIO.read(Main.class.getResource("resources/audio.png"));
 			BufferedImage bufferedPack = (BufferedImage) pack;
-			
-			ImageIO.write(bufferedPack, "png", new File(resourcePackFolder, "pack.png"));
+			ImageIO.write(bufferedPack, "png", new File(tempDir, "pack.png"));
 		}catch (IOException e) {
-			e.printStackTrace();
+			// No crítico si falla
 		}
 		
-		File assets = new File(resourcePackFolder + "/assets/minecraft/sounds/mediaplayer/");
+		// 3. Crear carpeta para sonidos y copiar audios
+		File assets = new File(tempDir, "assets/minecraft/sounds/mediaplayer/");
 		assets.mkdirs();
 		
-		File soundsFile = new File(resourcePackFolder + "/assets/minecraft/", "sounds.json");
-		
-		try {
-			
-		    Map<String, Map<String, Object>> soundsMap = new HashMap<>();
-		    Map<String, Object> submab = new HashMap<>();
-		    
-			for(int i = 0; i < video.getAudioChannels(); i++) {
-				
-				List<Map<String, Object>> param = new ArrayList<Map<String, Object>>();
-
-			    Map<String, Object> inner = new HashMap<>();
-			    
-			    inner.put("name", "mediaplayer/" + i);
-			    inner.put("preload", true);
-				
-			    param.add(inner);
-			    
-			    submab.put("sounds", param);
-			    soundsMap.put("mediaplayer." + i, submab);
-			    
-			    com.google.common.io.Files.copy(new File(video.getAudioFolder(), i + ".ogg"), new File(assets, i + ".ogg"));
-			}
-
-		    Writer writer = new FileWriter(soundsFile);
-
-		    new Gson().toJson(soundsMap, writer);
-
-		    writer.close();
-		}catch (Exception ex) {
-		    ex.printStackTrace();
+		for(int i = 0; i < video.getAudioChannels(); i++) {
+			Files.copy(new File(video.getAudioFolder(), i + ".ogg").toPath(),
+					   new File(assets, i + ".ogg").toPath(),
+					   StandardCopyOption.REPLACE_EXISTING);
 		}
-		JkPathTree.of(resourcePackFolder.toPath()).zipTo(zipFile.toPath());
+		
+		// 4. Crear archivo sounds.json con las definiciones de sonidos
+		File soundsFile = new File(tempDir, "assets/minecraft/sounds.json");
+		
+		Map<String, Map<String, Object>> soundsMap = new HashMap<>();
+		for(int i = 0; i < video.getAudioChannels(); i++) {
+			Map<String, Object> submab = new HashMap<>();
+			List<Map<String, Object>> param = new ArrayList<>();
+			
+			Map<String, Object> inner = new HashMap<>();
+			inner.put("name", "mediaplayer/" + i);
+			inner.put("preload", true);
+			param.add(inner);
+			
+			submab.put("sounds", param);
+			soundsMap.put("mediaplayer." + i, submab);
+		}
+		
+		try (Writer writer = new FileWriter(soundsFile)) {
+			new Gson().toJson(soundsMap, writer);
+		}
+		
+		// 5. Crear pack.mcmeta si no existe
+		File metaFile = new File(tempDir, "pack.mcmeta");
+		if(!metaFile.exists()) {
+			JSONObject metaJSON = new JSONObject();
+	        metaJSON.put("pack_format", getResourcePackFormat());
+	        metaJSON.put("description", "Audio addon for " + video.getName());
+	         
+	        JSONObject packObject = new JSONObject(); 
+	        packObject.put("pack", metaJSON);
+	        
+	        try (FileWriter file = new FileWriter(metaFile)) {
+	            file.write(packObject.toJSONString()); 
+	            file.flush();
+	        }catch (IOException e) {
+	            e.printStackTrace();
+	        }
+		}
+		
+		// 6. Comprimir todo en un nuevo zip
+		File outputZip = new File(videoData.getResourcePacksFolder(), video.getName() + ".zip");
+		zipDirectory(tempDir, outputZip);
+		
+		// 7. Eliminar carpeta temporal
+		deleteDirectory(tempDir);
 	}
 	
-	/**
-	* Gets the resource pack-format according to the server running
-	* version.
-	* 
-	* <p> <strong>Note: </strong>
-	* 
-	* 1 is for versions 1.6.1 - 1.8.9,
-	* 2 is for versions 1.9 - 1.10.2,
-	* 3 is for versions 1.11 - 1.12.2,
-	* 4 is for versions 1.13 - 1.14.4,
-	* 5 is for versions 1.15 - 1.16.1,
-	* 6 is for versions 1.16.2 - 1.16.5,
-    * 7 is for versions 1.17.x,
-	* 8 is for versions 1.18.x,
-	* 9 is for versions 1.19.1,
-	* 12 is for versions 1.19.2-3,
-	* 13 is for versions 1.19.4,
-	* 15 is for versions 1.20.1.
-	* 18 is for versions 1.20.2.
-	* 23 is for versions 1.20.3.
-	* 31 is for versions 1.20.4.
-	* 34 is for versions 1.21.1.
-	* 42 is for versions 1.21.3.
-	* 46 is for versions 1.21.4.
-	* 55 is for versions 1.21.4.
-	* 
-	* @return The resource pack-format.
-	*/
+	private void unzip(File zipFile, File destDir) throws IOException {
+		try (ZipInputStream zis = new ZipInputStream(new FileInputStream(zipFile))) {
+			ZipEntry entry;
+			while ((entry = zis.getNextEntry()) != null) {
+				File newFile = new File(destDir, entry.getName());
+				if(entry.isDirectory()) {
+					newFile.mkdirs();
+				} else {
+					newFile.getParentFile().mkdirs();
+					try (FileOutputStream fos = new FileOutputStream(newFile)) {
+						byte[] buffer = new byte[1024];
+						int len;
+						while ((len = zis.read(buffer)) > 0) {
+							fos.write(buffer, 0, len);
+						}
+					}
+				}
+				zis.closeEntry();
+			}
+		}
+	}
+	
+	private void zipDirectory(File folder, File zipFile) throws IOException {
+		try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(zipFile))) {
+			Path sourcePath = folder.toPath();
+			Files.walk(sourcePath).filter(path -> !Files.isDirectory(path)).forEach(path -> {
+				ZipEntry zipEntry = new ZipEntry(sourcePath.relativize(path).toString().replace("\\", "/"));
+				try {
+					zos.putNextEntry(zipEntry);
+					Files.copy(path, zos);
+					zos.closeEntry();
+				} catch (IOException e) {
+					e.printStackTrace();
+				}
+			});
+		}
+	}
+	
+	private void deleteDirectory(File dir) throws IOException {
+		if (dir.isDirectory()) {
+			for (File file : dir.listFiles()) {
+				deleteDirectory(file);
+			}
+		}
+		dir.delete();
+	}
 	
 	public int getResourcePackFormat() {
         if(plugin.getServerVersion().equals("v1_21_R4")) return 55;
